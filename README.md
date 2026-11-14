@@ -1,2 +1,2 @@
 # Throw-Food-For-Animals
-Hai
+Script only work in Matcha.
