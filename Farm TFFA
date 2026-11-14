@@ -444,7 +444,7 @@ end
 
 
 local ok, message = pcall(function()
-    destination = Vector3.new(0, 2, -45)
+    destination = Vector3.new(0, 4, -45)
     Players = game:GetService("Players")
     Workspace = game:GetService("Workspace")
     UI.SetValue(CONFIG.toggle, false)
