@@ -1,0 +1,543 @@
+-- Creador del script: 2by.
+local CONFIG = {
+    tab = "farm 2by",
+    toggle = "FARM",
+    session = "matchaisCrazy",
+    tween = 0.2,
+    delay = 1.2,
+    readyTime = 2,
+    cooldown = 0.35,
+    cameraDot = 0.82,
+    arrivalTolerance = 1,
+    key = 0x46, -- F
+}
+
+local function aviso(texto)
+    if type(notify) == "function" then
+        pcall(notify, texto, "farm 2by", 6)
+    end
+end
+
+if not (UI and UI.AddTab and UI.RemoveTab and UI.GetValue
+    and UI.SetValue and game and Vector3 and task and task.spawn
+    and type(wait) == "function" and type(tick) == "function"
+    and type(getfenv) == "function"
+    and type(mouse1click) == "function"
+    and type(iskeypressed) == "function"
+    and type(isrbxactive) == "function") then
+    aviso("Faltan funciones de Matcha. Actualiza o revisa el entorno.")
+    return
+end
+
+local env = getfenv()
+local previous = env[CONFIG.session]
+if type(previous) == "table" and type(previous.stop) == "function" then
+    pcall(previous.stop)
+end
+
+local S = {
+    alive = true,
+    enabled = false,
+    fault = nil,
+    status = "Desactivado",
+    phase = "idle",
+    activeElapsed = 0,
+    activeStarted = nil,
+    keyDown = true,
+}
+env[CONFIG.session] = S
+
+local destination
+local Players, Workspace
+
+local function resetCycle()
+    S.phase = "idle"
+    S.root, S.tool, S.origin, S.originFocus = nil, nil, nil, nil
+    S.started, S.readySince, S.arrivedSince = nil, nil, nil
+end
+
+local function setEnabled(value)
+    if not S.alive then return end
+    value = value == true or value == 1
+    
+    if S.enabled == value and not S.fault then return end
+    local now = tick()
+    if S.activeStarted then
+        S.activeElapsed = S.activeElapsed + math.max(0, now - S.activeStarted)
+    end
+    S.activeStarted = value and now or nil
+    resetCycle()
+    S.attempts = 0
+    S.enabled = value
+    if value then
+        S.fault = nil
+    end
+    S.status = S.fault and "Error: activa el toggle para reintentar"
+        or (value and "Esperando objeto equipado..." or "Desactivado")
+end
+
+local function activeTime()
+    local seconds = S.activeElapsed
+    if S.activeStarted then
+        seconds = seconds + math.max(0, tick() - S.activeStarted)
+    end
+    seconds = math.floor(seconds)
+    return string.format("%02d:%02d:%02d", math.floor(seconds / 3600),
+        math.floor(seconds / 60) % 60, seconds % 60)
+end
+
+local function syncToggle()
+    local value
+    if S.toggleWidget then
+        local ok, result = pcall(function() return S.toggleWidget:GetValue() end)
+        if ok then value = result end
+    end
+    if type(value) ~= "boolean" and value ~= 0 and value ~= 1 then
+        value = UI.GetValue(CONFIG.toggle)
+    end
+    if type(value) == "boolean" or value == 0 or value == 1 then
+        local enabled = value == true or value == 1
+        -- Un error permanece visible hasta que se active de nuevo.
+        if enabled ~= S.enabled then setEnabled(enabled) end
+    end
+end
+
+function S.stop()
+    if not S.alive then return end
+    setEnabled(false)
+    S.alive = false
+    S.enabled = false
+    resetCycle()
+    if env[CONFIG.session] == S then
+        env[CONFIG.session] = nil
+        pcall(UI.RemoveTab, CONFIG.tab)
+    end
+end
+
+local function fail(message)
+    if S.fault then return end
+    setEnabled(false)
+    resetCycle()
+    S.enabled = false
+    S.fault = tostring(message)
+    S.status = "Error: activa el toggle para reintentar"
+    pcall(UI.SetValue, CONFIG.toggle, false)
+end
+
+local function pause(message)
+    resetCycle()
+    S.status = message
+end
+
+
+local function equippedObject(character)
+    return character:FindFirstChildOfClass("Tool")
+end
+
+local function playerState()
+    local player = Players.LocalPlayer
+    local character = player and player.Character
+    if not character then return nil end
+    local humanoid = character:FindFirstChildOfClass("Humanoid")
+    local root = character:FindFirstChild("HumanoidRootPart")
+    if not humanoid or humanoid.Health <= 0 or not root then
+        return nil
+    end
+    return character, root, equippedObject(character)
+end
+
+local function cameraFollows(focus)
+    local camera = Workspace.CurrentCamera
+    if not camera then return false end
+    local cf = camera.CFrame
+    local function pointsTo(point)
+        local delta = point - cf.Position
+        if delta.Magnitude < 2 then return true end
+        return cf.LookVector:Dot(delta.Unit) >= CONFIG.cameraDot
+    end
+    if pointsTo(focus) then return true end
+    -- Durante el tween, la camara puede seguir mirando al origen.
+    return S.phase == "moving" and S.originFocus ~= nil
+        and pointsTo(S.originFocus)
+end
+
+local function update()
+    syncToggle()
+    local foreground = isrbxactive()
+    local down = iskeypressed(CONFIG.key)
+    if foreground and down and not S.keyDown then
+        setEnabled(not S.enabled)
+        UI.SetValue(CONFIG.toggle, S.enabled)
+    end
+    S.keyDown = down
+
+    if not S.enabled or S.fault then return end
+
+    if not foreground then
+        pause("Pausado: Roblox no esta en primer plano")
+        return
+    end
+
+    local character, root, tool = playerState()
+    if not root then
+        pause("Esperando personaje vivo...")
+        return
+    end
+    if not tool then
+        pause("Esperando objeto en la mano...")
+        return
+    end
+
+    if S.root ~= root or S.tool ~= tool then
+        resetCycle()
+        S.root, S.tool = root, tool
+    end
+
+    local head = character:FindFirstChild("Head")
+    local focus = head and head.Position or root.Position
+    if S.phase ~= "moving" and S.phase ~= "confirming" and not cameraFollows(focus) then
+        pause("Pausado: camara / cinematica")
+        return
+    end
+
+    local now = tick()
+    if S.phase == "idle" then
+        S.readySince = S.readySince or now
+        S.status = "Objeto detectado: esperando 2 s..."
+        if now - S.readySince >= CONFIG.readyTime then
+            S.attempts = (S.attempts or 0) + 1
+            if S.attempts > 3 then
+                fail("No se pudo confirmar el destino tras 3 intentos")
+                return
+            end
+            S.origin = root.Position
+            S.originFocus = focus
+            S.started = now
+            S.phase = "moving"
+            S.status = "Moviendo al destino..."
+        end
+
+    elseif S.phase == "moving" then
+        local alpha = math.min((now - S.started) / CONFIG.tween, 1)
+        root.Position = S.origin:Lerp(destination, alpha)
+        if alpha >= 1 then
+            S.phase = "confirming"
+            S.started = now
+            S.arrivedSince = nil
+            S.status = "Confirmando llegada..."
+        end
+
+    elseif S.phase == "confirming" then
+    
+        if (root.Position - destination).Magnitude <= CONFIG.arrivalTolerance then
+            S.arrivedSince = S.arrivedSince or now
+            if now - S.arrivedSince >= 0.05 then
+                S.phase = "delay"
+                S.started = now
+                S.originFocus = nil
+                S.status = "Esperando " .. tostring(CONFIG.delay) .. " s para tirar..."
+            end
+        else
+            S.arrivedSince = nil
+        end
+        if S.phase == "confirming" and now - S.started > 0.5 then
+            pause("Destino no confirmado; reintentando...")
+        end
+
+    elseif S.phase == "delay" then
+        if (root.Position - destination).Magnitude > CONFIG.arrivalTolerance then
+            pause("Posicion desplazada: preparando otro goto...")
+            return
+        end
+        if now - S.started >= CONFIG.delay then
+            
+            S.phase = "cooldown"
+            S.started = now
+            mouse1click()
+            S.attempts = 0
+            S.status = "Clic enviado; esperando al juego..."
+        end
+
+    elseif S.phase == "cooldown" then
+        if now - S.started >= CONFIG.cooldown then
+            resetCycle()
+        end
+    end
+end
+
+
+local T = {
+    status = "Desactivado", nextSend = 0,
+    lastURL = "", failures = 0, wasOn = false,
+}
+local INTERVALS = {60, 300, 600, 1800, 3600}
+local function selectedInterval()
+    local index = tonumber(UI.GetValue("farm_webhook_preset")) or 0
+    return INTERVALS[index + 1] or 60
+end
+local function finite(value)
+    return type(value) == "number" and value == value
+        and value ~= math.huge and value ~= -math.huge
+end
+
+local function webhookURL(raw)
+    local url = tostring(raw or ""):match("^%s*(.-)%s*$")
+  
+    local host, path = url:match("^https://([^/]+)(/api/.*)$")
+    if host ~= "discord.com" and host ~= "discordapp.com" then return nil end
+    local id, token = path:match("^/api/webhooks/(%d+)/([%w_%-]+)$")
+    if not id then
+        id, token = path:match("^/api/v%d+/webhooks/(%d+)/([%w_%-]+)$")
+    end
+    if not id then return nil end
+    return "https://discord.com/api/webhooks/" .. id .. "/" .. token .. "?wait=true"
+end
+
+local STORAGE = {path = "farm_2by/webhook.txt", saved = "", status = "Sin guardar", retryAt = 0}
+
+local function loadWebhook()
+    if type(readfile) ~= "function" or type(writefile) ~= "function" or type(isfile) ~= "function" then
+        STORAGE.status = "Guardado local no disponible"
+        return
+    end
+    local ok, value = pcall(function()
+        if not isfile(STORAGE.path) then return "" end
+        return readfile(STORAGE.path)
+    end)
+    if ok and type(value) == "string" and (value == "" or webhookURL(value)) then
+        STORAGE.saved = value
+        STORAGE.status = value ~= "" and "Webhook recuperado" or "Sin webhook guardado"
+    else
+        STORAGE.status = "No se pudo recuperar el webhook"
+    end
+end
+
+local function saveWebhook(value)
+    if not S.alive then return end
+    value = tostring(value or ""):match("^%s*(.-)%s*$")
+    if value == STORAGE.saved then return end
+    if value ~= "" and not webhookURL(value) then
+        STORAGE.status = "URL invalida: se conserva el webhook guardado"
+        return
+    end
+    if type(writefile) ~= "function" or type(readfile) ~= "function" then
+        STORAGE.status = "Guardado local no disponible"
+        return
+    end
+    if tick() < STORAGE.retryAt then return end
+    local ok = pcall(function()
+        writefile(STORAGE.path, value)
+        assert(readfile(STORAGE.path) == value, "No se pudo verificar el guardado")
+    end)
+    if ok then
+        STORAGE.saved = value
+        STORAGE.status = value ~= "" and "Webhook guardado" or "Webhook borrado"
+        STORAGE.retryAt = 0
+    else
+        STORAGE.status = "No se pudo guardar; se reintentara"
+        STORAGE.retryAt = tick() + 30
+    end
+end
+
+local EDIT = {open = false}
+local function splitURL(value)
+    for i = 1, 8 do
+        UI.SetValue("farm_url_part_" .. i, value:sub((i - 1) * 24 + 1, i * 24))
+    end
+end
+local function joinedURL()
+    local parts = {}
+    for i = 1, 8 do parts[i] = tostring(UI.GetValue("farm_url_part_" .. i) or "") end
+    return table.concat(parts)
+end
+local function normalizeParts()
+    for i = 1, 8 do
+        local value = tostring(UI.GetValue("farm_url_part_" .. i) or "")
+        if #value > 24 then
+            local combined = value:match("^%s*(https://.-)%s*$") or joinedURL()
+            if #combined <= 192 then
+                splitURL(combined)
+            else
+                UI.SetValue("farm_url_part_" .. i, "")
+                STORAGE.status = "URL demasiado larga"
+            end
+            return
+        end
+    end
+end
+
+local function telemetryUpdate()
+    local now = tick()
+    local on = UI.GetValue("farm_webhook_on") == true
+    local raw = UI.GetValue("farm_webhook_url") or ""
+    -- Respaldo del callback: guardar solo tras 2 s sin cambios.
+    if raw ~= STORAGE.pending then
+        STORAGE.pending, STORAGE.changedAt = raw, now
+    elseif now - STORAGE.changedAt >= 2 then
+        saveWebhook(raw)
+    end
+    if not on then
+        T.status, T.wasOn = "Desactivado", false
+        return
+    end
+    if raw ~= T.lastURL or not T.wasOn then
+        T.nextSend, T.failures = 0, 0
+        T.lastURL = raw
+    end
+    T.wasOn = true
+    local url = webhookURL(raw)
+    if not url then
+        T.status = "Introduce un webhook valido de Discord"
+        return
+    end
+    if type(httppost) ~= "function" then
+        T.status = "HTTP no disponible en esta version de Matcha"
+        return
+    end
+    local interval = selectedInterval()
+    if T.interval ~= interval then
+        T.interval = interval
+        if T.lastSent and T.failures == 0 then T.nextSend = T.lastSent + interval end
+    end
+    if now < T.nextSend then return end
+    if S.phase == "moving" or S.phase == "confirming" or S.phase == "delay" then return end
+
+    T.nextSend = now + interval
+    local http = game:GetService("HttpService")
+   
+    local farmState = S.enabled and "Activo" or "Inactivo"
+    local color = S.enabled and 3447003 or 9807270
+    local body = '{"username":"farm 2by","allowed_mentions":{"parse":[]},"embeds":[{'
+        .. '"title":"farm 2by","color":' .. tostring(color)
+        .. ',"fields":[{"name":"Farm","value":' .. http:JSONEncode(farmState)
+        .. ',"inline":true},{"name":"Tiempo activo","value":'
+        .. http:JSONEncode(activeTime())
+        .. ',"inline":true}],"footer":{"text":"Autofarm creado por 2by."}}]}'
+    
+    resetCycle()
+    T.status = "Enviando..."
+    local ok, response = pcall(httppost, url, body, "application/json")
+    if not S.alive or env[CONFIG.session] ~= S then return end
+    local decoded, data = false, nil
+    if ok and type(response) == "string" and response ~= "" then
+        decoded, data = pcall(function() return http:JSONDecode(response) end)
+    end
+    if decoded and type(data) == "table" and data.id then
+        T.status, T.failures = "Ultimo reporte confirmado", 0
+        T.lastSent = tick()
+        T.nextSend = T.lastSent + interval
+    else
+        T.failures = math.min(T.failures + 1, 5)
+        local retry = math.min(600, 30 * 2 ^ T.failures)
+        if decoded and type(data) == "table" then
+            if finite(data.retry_after) then retry = math.max(retry, data.retry_after + 1) end
+            if data.code == 10015 or data.code == 50027 or data.code == 50001 then
+                UI.SetValue("farm_webhook_on", false)
+                T.status = "Webhook rechazado; revisa la URL"
+                return
+            end
+        end
+        T.nextSend = tick() + retry
+        T.status = "Sin confirmacion; reintento en " .. tostring(retry) .. " s"
+    end
+end
+
+
+local ok, message = pcall(function()
+    destination = Vector3.new(0, 2, -45)
+    Players = game:GetService("Players")
+    Workspace = game:GetService("Workspace")
+    UI.SetValue(CONFIG.toggle, false)
+    UI.SetValue("farm_webhook_on", true)
+    loadWebhook()
+    UI.SetValue("farm_webhook_url", STORAGE.saved)
+    UI.SetValue("farm_webhook_preset", 0)
+
+    UI.AddTab(CONFIG.tab, function(tab)
+        if not S.alive or S.uiFailed then return end
+        local rendered, renderError = pcall(function()
+            local control = tab:Section("Control", "Left")
+            S.toggleWidget = control:Toggle(CONFIG.toggle, "Activar farm")
+            syncToggle()
+            control:Tip("F activa o desactiva el mismo toggle.")
+            control:Spacing()
+            control:Text("Estado del farm: " .. S.status)
+            control:Text("Tiempo activo: " .. activeTime())
+            control:Tip("Acumulado mientras el toggle esta activado; se pausa al apagarlo.")
+            if S.fault then
+                control:Text("Se cancelo el ciclo por un error.")
+                control:Tip(S.fault)
+            end
+            control:Spacing()
+            control:Button("Detener", function()
+                UI.SetValue(CONFIG.toggle, false)
+                setEnabled(false)
+            end)
+
+            local info = tab:Section("Discord", "Right")
+            info:Text(STORAGE.saved ~= "" and "Webhook: configurado" or "Webhook: sin configurar")
+            info:Button("Cambiar webhook", function()
+                EDIT.open = not EDIT.open
+                splitURL(UI.GetValue("farm_webhook_url") or STORAGE.saved)
+            end)
+            if EDIT.open then
+                -- Campos cortos: el enlace completo nunca se dibuja en una linea.
+                normalizeParts()
+                info:Text("Pega la URL en Parte 1")
+                for i = 1, 8 do
+                    info:InputText("farm_url_part_" .. i, "Parte " .. i, "")
+                end
+                info:Button("Guardar webhook", function()
+                    normalizeParts()
+                    local value = joinedURL()
+                    if value == "" or webhookURL(value) then
+                        UI.SetValue("farm_webhook_url", value)
+                        saveWebhook(value)
+                        EDIT.open = false
+                    else
+                        STORAGE.status = "URL invalida"
+                    end
+                end)
+            end
+            info:Text("Guardado: " .. STORAGE.status)
+            info:Toggle("farm_webhook_on", "Enviar reportes", true)
+            info:Combo("farm_webhook_preset", "Enviar cada", {"1m", "5m", "10m", "30m", "1h"}, 0)
+            info:Text("Webhook: " .. T.status)
+
+            local credits = tab:Section("Creditos", "Right")
+            credits:Text("Creador del script: 2by.")
+        end)
+        if not rendered then
+            S.uiFailed = true
+            fail(renderError)
+            aviso("No se pudo dibujar la UI. Recarga el script.")
+        end
+    end)
+end)
+
+if not ok then
+    S.stop()
+    aviso("No se pudo iniciar: " .. tostring(message))
+    return
+end
+
+
+task.spawn(function()
+    while S.alive and env[CONFIG.session] == S do
+        local success, detail = pcall(update)
+        if not success then fail(detail) end
+        wait(S.phase == "moving" and 0.008 or 0.025)
+    end
+end)
+
+
+task.spawn(function()
+    while S.alive and env[CONFIG.session] == S do
+        local success = pcall(telemetryUpdate)
+        if not success then
+            T.status = "Error de reporte; reintento en 120 s"
+            T.nextSend = tick() + 120
+        end
+        wait(1)
+    end
+end)
