@@ -3,8 +3,8 @@ local CONFIG = {
     tab = "farm 2by",
     toggle = "FARM",
     session = "matchaisCrazy",
-    tween = 40,
-    delay = 1.2,
+    tweenSpeed = 100,
+    delay = 1.6,
     readyTime = 2,
     cooldown = 0.35,
     cameraDot = 0.82,
@@ -38,6 +38,7 @@ end
 local S = {
     alive = true,
     enabled = false,
+    firstPass = true, -- Se utiliza al activar el toggle por primera vez.
     fault = nil,
     status = "Desactivado",
     phase = "idle",
@@ -54,6 +55,7 @@ local function resetCycle()
     S.phase = "idle"
     S.root, S.tool, S.origin, S.originFocus = nil, nil, nil, nil
     S.started, S.readySince, S.arrivedSince = nil, nil, nil
+    S.moveDuration = nil
 end
 
 local function setEnabled(value)
@@ -69,6 +71,7 @@ local function setEnabled(value)
     resetCycle()
     S.attempts = 0
     S.enabled = value
+    if not value then S.firstPass = false end
     if value then
         S.fault = nil
     end
@@ -183,12 +186,12 @@ local function update()
         pause("Esperando personaje vivo...")
         return
     end
-    if not tool then
+    if not tool and not S.firstPass then
         pause("Esperando objeto en la mano...")
         return
     end
 
-    if S.root ~= root or S.tool ~= tool then
+    if S.root ~= root or (not S.firstPass and S.tool ~= tool) then
         resetCycle()
         S.root, S.tool = root, tool
     end
@@ -203,14 +206,17 @@ local function update()
     local now = tick()
     if S.phase == "idle" then
         S.readySince = S.readySince or now
-        S.status = "Objeto detectado: esperando 2 s..."
-        if now - S.readySince >= CONFIG.readyTime then
+        local readyDelay = S.firstPass and 0 or CONFIG.readyTime
+        S.status = S.firstPass and "Iniciando primer recorrido..."
+            or "Objeto detectado: esperando 2 s..."
+        if now - S.readySince >= readyDelay then
             S.attempts = (S.attempts or 0) + 1
             if S.attempts > 3 then
                 fail("No se pudo confirmar el destino tras 3 intentos")
                 return
             end
             S.origin = root.Position
+            S.moveDuration = (destination - S.origin).Magnitude / CONFIG.tweenSpeed
             S.originFocus = focus
             S.started = now
             S.phase = "moving"
@@ -218,7 +224,9 @@ local function update()
         end
 
     elseif S.phase == "moving" then
-        local alpha = math.min((now - S.started) / CONFIG.tween, 1)
+        local alpha = S.moveDuration > 0
+            and math.min(math.max((now - S.started) / S.moveDuration, 0), 1)
+            or 1
         root.Position = S.origin:Lerp(destination, alpha)
         if alpha >= 1 then
             S.phase = "confirming"
@@ -254,6 +262,7 @@ local function update()
             S.phase = "cooldown"
             S.started = now
             mouse1click()
+            S.firstPass = false
             S.attempts = 0
             S.status = "Clic enviado; esperando al juego..."
         end
@@ -444,7 +453,9 @@ end
 
 
 local ok, message = pcall(function()
-    destination = Vector3.new(0, 4, -45)
+    assert(type(CONFIG.tweenSpeed) == "number" and CONFIG.tweenSpeed > 0
+        and CONFIG.tweenSpeed < math.huge, "Velocidad de tween invalida")
+    destination = Vector3.new(0, 5, -45)
     Players = game:GetService("Players")
     Workspace = game:GetService("Workspace")
     UI.SetValue(CONFIG.toggle, false)
